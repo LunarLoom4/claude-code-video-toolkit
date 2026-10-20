@@ -7,6 +7,7 @@ handles submission, polling, timeout, and cancellation for the chosen provider.
 Supported providers:
 - runpod: RunPod serverless endpoints (existing)
 - modal: Modal web endpoints (new)
+- local: the user's own NVIDIA GPU, for the tools in local_gpu.FEATURES
 """
 from __future__ import annotations
 
@@ -269,7 +270,7 @@ def call_cloud_endpoint(
     """Submit a job to a cloud GPU endpoint and wait for the result.
 
     Args:
-        provider: "runpod" or "modal"
+        provider: "runpod", "modal" or "local"
         payload: The job payload ({"input": {...}} for RunPod, raw dict for Modal)
         tool_name: Config lookup key (e.g., "qwen3_tts", "flux2")
         timeout: Overall timeout in seconds
@@ -284,11 +285,17 @@ def call_cloud_endpoint(
         (result_dict, elapsed_seconds) — result_dict contains the job output
         or {"error": "..."} on failure.
     """
-    config = get_provider_config(provider, tool_name)
-
     # Create a default reporter if none provided
     if progress is None and verbose:
         progress = ProgressReporter(mode="human")
+
+    if provider == "local":
+        # Free, so no cost estimate. Timeouts don't apply (see call_local).
+        from local_gpu import call_local
+        return call_local(payload=payload, tool_name=tool_name,
+                          progress_label=progress_label, progress=progress)
+
+    config = get_provider_config(provider, tool_name)
 
     if provider == "runpod":
         result, elapsed = _call_runpod(

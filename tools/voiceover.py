@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     get_brand_dir,
     get_elevenlabs_api_key,
+    get_qwen3_tts_cloud,
     get_sixtydb_api_key,
     get_sixtydb_voice_id,
     get_voice_id,
@@ -298,9 +299,10 @@ Examples:
     parser.add_argument(
         "--cloud",
         type=str,
-        default="modal",
-        choices=["runpod", "modal"],
-        help="Cloud GPU provider for Qwen3-TTS (default: modal)",
+        default=get_qwen3_tts_cloud(),
+        choices=["runpod", "modal", "local"],
+        help="Cloud GPU provider for Qwen3-TTS (default: QWEN3_TTS_CLOUD, else modal). "
+             "'local' runs on your own NVIDIA GPU (see tools/local_gpu.py)",
     )
 
     # Brand integration

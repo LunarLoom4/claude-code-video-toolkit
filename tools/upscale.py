@@ -11,6 +11,9 @@ Usage:
     # Using Modal
     uv run tools/upscale.py --input image.jpg --output upscaled.png --cloud modal
 
+    # On your own NVIDIA GPU (free, no --face-enhance; see tools/local_gpu.py)
+    uv run tools/upscale.py --input image.jpg --output upscaled.png --cloud local
+
     # Specify model and scale
     uv run tools/upscale.py --input image.jpg --output upscaled.png --model anime --scale 4 --cloud runpod
 
@@ -66,21 +69,9 @@ def process_with_cloud(
         if verbose:
             print(f"Cloud provider: {cloud}", file=sys.stderr)
 
-        # Upload image
-        image_url, image_r2_key = upload_to_storage(input_path, "upscale/input")
-        if not image_url:
-            return {"error": "Failed to upload image"}
-        if image_r2_key:
-            r2_keys_to_cleanup.append(image_r2_key)
-
-        # Build payload
-        if verbose:
-            print(f"Submitting job (scale={scale}, model={model})...", file=sys.stderr)
-
         payload = {
             "input": {
                 "operation": "upscale",
-                "image_url": image_url,
                 "scale": scale,
                 "model": model,
                 "face_enhance": face_enhance,
@@ -88,9 +79,25 @@ def process_with_cloud(
             }
         }
 
-        r2_payload = get_r2_payload_config()
-        if r2_payload:
-            payload["input"]["r2"] = r2_payload
+        if cloud == "local":
+            # The local worker reads and writes the files itself
+            payload["input"]["image_path"] = str(Path(input_path).resolve())
+            payload["input"]["output_path"] = str(Path(output_path).resolve())
+        else:
+            # Upload image
+            image_url, image_r2_key = upload_to_storage(input_path, "upscale/input")
+            if not image_url:
+                return {"error": "Failed to upload image"}
+            if image_r2_key:
+                r2_keys_to_cleanup.append(image_r2_key)
+            payload["input"]["image_url"] = image_url
+
+            r2_payload = get_r2_payload_config()
+            if r2_payload:
+                payload["input"]["r2"] = r2_payload
+
+        if verbose:
+            print(f"Submitting job (scale={scale}, model={model})...", file=sys.stderr)
 
         # Call cloud GPU endpoint
         from cloud_gpu import call_cloud_endpoint
@@ -115,6 +122,9 @@ def process_with_cloud(
         output_r2_key = result.get("r2_key") if isinstance(result, dict) else None
         output_url = result.get("output_url") if isinstance(result, dict) else None
 
+        if cloud == "local":
+            downloaded = Path(output_path).exists()
+
         if output_r2_key:
             if verbose:
                 print(f"Downloading result from R2...", file=sys.stderr)
@@ -130,6 +140,12 @@ def process_with_cloud(
             # Same object the r2_key names -- register it however we fetched it.
             if downloaded and output_r2_key:
                 r2_keys_to_cleanup.append(output_r2_key)
+
+        # Endpoints return base64 when R2 isn't configured
+        if not downloaded and isinstance(result, dict) and result.get("image_base64"):
+            import base64
+            Path(output_path).write_bytes(base64.b64decode(result.pop("image_base64")))
+            downloaded = True
 
         if not downloaded:
             return {"error": f"No output_url or r2_key in result: {result}"}
@@ -515,8 +531,9 @@ Examples:
         "--cloud",
         type=str,
         default=None,
-        choices=["runpod", "modal"],
-        help="Cloud GPU provider (default: runpod)",
+        choices=["runpod", "modal", "local"],
+        help="Cloud GPU provider (default: runpod). 'local' runs on your own NVIDIA "
+             "GPU for free; install with: uv run tools/local_gpu.py --install upscale",
     )
     parser.add_argument(
         "--runpod",
@@ -580,7 +597,12 @@ def main():
 
     # Handle --setup
     if args.setup:
-        result = setup_runpod(gpu_id=args.setup_gpu, verbose=verbose)
+        if args.cloud == "local":
+            from local_gpu import check_status, install
+            ok = install(["upscale"], verbose=verbose)
+            result = check_status() if ok else {"error": "local GPU install failed"}
+        else:
+            result = setup_runpod(gpu_id=args.setup_gpu, verbose=verbose)
         if args.json:
             print(json.dumps(result, indent=2))
         if result.get("error"):
@@ -652,7 +674,7 @@ def main():
         return
 
     # No cloud provider specified
-    print("Error: Specify --cloud runpod or --cloud modal for cloud processing.", file=sys.stderr)
+    print("Error: Specify --cloud runpod, --cloud modal, or --cloud local (your own GPU).", file=sys.stderr)
     print("       Or run --setup first to configure a RunPod endpoint.", file=sys.stderr)
     sys.exit(1)
 

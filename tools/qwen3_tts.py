@@ -12,6 +12,9 @@ Usage:
     # Using Modal instead of RunPod
     uv run tools/qwen3_tts.py --text "Hello world" --cloud modal --output hello.mp3
 
+    # On your own NVIDIA GPU (free; see tools/local_gpu.py)
+    uv run tools/qwen3_tts.py --text "Hello world" --cloud local --output hello.mp3
+
     # With tone preset
     uv run tools/qwen3_tts.py --text "Hello world" --tone warm --output hello.mp3
 
@@ -114,6 +117,7 @@ from file_transfer import (
     upload_to_storage, download_from_r2, r2_cleanup,
     download_from_url, get_r2_payload_config,
 )
+from config import get_qwen3_tts_cloud
 
 
 def get_audio_duration(file_path: str) -> float | None:
@@ -188,8 +192,9 @@ def generate_audio(
         if any(not t for t in texts):
             return {"success": False, "error": "all texts must be non-empty strings"}
 
-        # Get R2 config (used for file transfer regardless of cloud provider)
-        r2_payload = get_r2_payload_config()
+        # Get R2 config (used for file transfer regardless of cloud provider;
+        # a local worker reads and returns files directly)
+        r2_payload = get_r2_payload_config() if cloud != "local" else None
 
         # Determine mode
         if design_instruct is not None:
@@ -209,11 +214,12 @@ def generate_audio(
             if not ref_text:
                 return {"success": False, "error": "ref_text is required for voice cloning"}
 
-            ref_audio_url, ref_r2_key = upload_to_storage(ref_audio, "qwen3-tts/input")
-            if not ref_audio_url:
-                return {"success": False, "error": "Failed to upload reference audio"}
-            if ref_r2_key:
-                r2_keys_to_cleanup.append(ref_r2_key)
+            if cloud != "local":
+                ref_audio_url, ref_r2_key = upload_to_storage(ref_audio, "qwen3-tts/input")
+                if not ref_audio_url:
+                    return {"success": False, "error": "Failed to upload reference audio"}
+                if ref_r2_key:
+                    r2_keys_to_cleanup.append(ref_r2_key)
 
         if verbose:
             print(f"Cloud provider: {cloud}", file=sys.stderr)
@@ -235,7 +241,10 @@ def generate_audio(
         }
 
         if mode == "clone":
-            payload["input"]["ref_audio_url"] = ref_audio_url
+            if cloud == "local":
+                payload["input"]["ref_audio_path"] = str(Path(ref_audio).resolve())
+            else:
+                payload["input"]["ref_audio_url"] = ref_audio_url
             payload["input"]["ref_text"] = ref_text
         elif mode == "voice_design":
             payload["input"]["instruct"] = design_instruct
@@ -748,6 +757,9 @@ Examples:
   # Using Modal instead
   uv run tools/qwen3_tts.py --text "Hello world" --cloud modal --output hello.mp3
 
+  # On your own NVIDIA GPU (free; install once with tools/local_gpu.py)
+  uv run tools/qwen3_tts.py --text "Hello world" --cloud local --output hello.mp3
+
   # With emotion control
   uv run tools/qwen3_tts.py --text "Great news!" --instruct "Speak enthusiastically" --output excited.mp3
 
@@ -855,9 +867,10 @@ Examples:
     parser.add_argument(
         "--cloud",
         type=str,
-        default="modal",
-        choices=["runpod", "modal"],
-        help="Cloud GPU provider (default: modal)",
+        default=get_qwen3_tts_cloud(),
+        choices=["runpod", "modal", "local"],
+        help="Cloud GPU provider (default: QWEN3_TTS_CLOUD, else modal). 'local' runs on "
+             "your own NVIDIA GPU for free; install with: uv run tools/local_gpu.py --install qwen3_tts",
     )
     parser.add_argument(
         "--timeout",
@@ -946,7 +959,11 @@ def main():
 
     # Handle --setup
     if args.setup:
-        if args.cloud == "modal":
+        if args.cloud == "local":
+            from local_gpu import check_status, install
+            ok = install(["qwen3_tts"], verbose=verbose)
+            result = check_status() if ok else {"error": "local GPU install failed"}
+        elif args.cloud == "modal":
             result = setup_modal(verbose=verbose)
         else:
             result = setup_runpod(gpu_id=args.setup_gpu, verbose=verbose)

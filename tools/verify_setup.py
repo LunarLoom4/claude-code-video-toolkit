@@ -252,13 +252,20 @@ def check_voice() -> dict:
     elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
     elevenlabs_voice = os.getenv("ELEVENLABS_VOICE_ID")
 
-    # Qwen3-TTS is "configured" if its endpoint exists (either Modal or RunPod)
+    # Qwen3-TTS is "configured" if its endpoint exists (either Modal or RunPod),
+    # or it runs on the local GPU
     qwen3_modal = os.getenv("MODAL_QWEN3_TTS_ENDPOINT_URL")
     qwen3_runpod = os.getenv("RUNPOD_QWEN3_TTS_ENDPOINT_ID")
-    qwen3_ok = bool(qwen3_modal) or bool(qwen3_runpod)
+    from local_gpu import quick_status
+    qwen3_local = quick_status()["features"]["qwen3_tts"]
+    qwen3_ok = bool(qwen3_modal) or bool(qwen3_runpod) or qwen3_local
+    detail = ("Modal" if qwen3_modal else "RunPod" if qwen3_runpod
+              else "local GPU" if qwen3_local else "not configured")
+    if qwen3_local and os.getenv("QWEN3_TTS_CLOUD") == "local":
+        detail = "local GPU (default)"
 
     return {
-        "qwen3_tts": {"ok": qwen3_ok, "detail": "Modal" if qwen3_modal else ("RunPod" if qwen3_runpod else "not configured")},
+        "qwen3_tts": {"ok": qwen3_ok, "local": qwen3_local, "detail": detail},
         "elevenlabs": {"ok": bool(elevenlabs_key), "detail": "configured" if elevenlabs_key else "not configured (optional)"},
     }
 
@@ -376,6 +383,29 @@ def main():
             print(f"  {'[x]' if t['ok'] else '[ ]'} {t['name']}: {t['detail']}")
         print()
 
+    # 4b. Local GPU (--cloud local)
+    from local_gpu import FEATURES as LOCAL_FEATURES, check_status as local_check_status, quick_status
+    local = quick_status()
+    if args.test and local["env"]:
+        full = local_check_status()  # imports torch and runs a CUDA op
+        local.update({k: full[k] for k in ("gpu", "vram_gb", "torch", "cuda", "error")})
+        local["ok"] = full["installed"]
+    else:
+        local["ok"] = local["env"] and any(local["features"].values())
+    results["local_gpu"] = local
+    if verbose:
+        n = sum(local["features"].values())
+        print(f"Local GPU ({n}/{len(LOCAL_FEATURES)} tools, free):")
+        if local.get("gpu"):
+            print(f"  GPU: {local['gpu']} ({local['vram_gb']}GB), torch {local['torch']} / CUDA {local['cuda']}")
+        if local.get("error"):
+            print(f"  [ ] {local['error']}")
+        for name, ok in local["features"].items():
+            print(f"  {'[x]' if ok else '[ ]'} {LOCAL_FEATURES[name]['description']}")
+        if n < len(LOCAL_FEATURES):
+            print("  Install: uv run tools/local_gpu.py --install --all (NVIDIA GPU, 8GB+)")
+        print()
+
     # 5. Voice
     voice = check_voice()
     results["voice"] = voice
@@ -393,13 +423,14 @@ def main():
         # Pick best available provider
         provider = "modal" if modal_configured > 0 else "runpod"
 
-        # Test TTS if available
+        # Test TTS if available (locally when it's installed there: free)
         qwen3_ok = voice["qwen3_tts"]["ok"]
         if qwen3_ok:
-            tts_test = test_cloud_endpoint("qwen3_tts", provider)
+            tts_provider = "local" if voice["qwen3_tts"]["local"] and local["ok"] else provider
+            tts_test = test_cloud_endpoint("qwen3_tts", tts_provider)
             results["test_qwen3_tts"] = tts_test
             if verbose:
-                print(f"  {'[x]' if tts_test['ok'] else '[ ]'} Qwen3-TTS ({provider}): {tts_test['detail']}")
+                print(f"  {'[x]' if tts_test['ok'] else '[ ]'} Qwen3-TTS ({tts_provider}): {tts_test['detail']}")
 
         # Test FLUX.2 if available
         flux2_ok = any(t["ok"] for t in modal_env if "FLUX2" in t.get("env_var", ""))
@@ -417,12 +448,14 @@ def main():
     # Summary
     all_ok = all(p["ok"] for p in prereqs if p["required"])
     cloud_ok = modal_configured > 0 or sum(1 for t in runpod_env if t["ok"]) > 1
+    local_ok = local["ok"]
     r2_ok = r2["ok"]
     voice_ok = voice["qwen3_tts"]["ok"] or voice["elevenlabs"]["ok"]
 
     results["summary"] = {
         "prerequisites": all_ok,
         "cloud_gpu": cloud_ok,
+        "local_gpu": local_ok,
         "file_transfer": r2_ok,
         "voice": voice_ok,
         "ready": all_ok,  # Only prereqs are truly required
@@ -434,6 +467,7 @@ def main():
         print("=" * 40)
         print(f"  Prerequisites:  {'ready' if all_ok else 'ISSUES'}")
         print(f"  Cloud GPU:      {'ready' if cloud_ok else 'not configured'}")
+        print(f"  Local GPU:      {'ready' if local_ok else 'not configured'}")
         print(f"  File transfer:  {'ready' if r2_ok else 'not configured (using fallback)'}")
         print(f"  Voice:          {'ready' if voice_ok else 'not configured'}")
         print()
