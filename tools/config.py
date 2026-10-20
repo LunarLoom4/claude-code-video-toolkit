@@ -51,6 +51,13 @@ def get_elevenlabs_api_key() -> str | None:
     return os.getenv("ELEVENLABS_API_KEY")
 
 
+def get_qwen3_tts_cloud() -> str:
+    """Default --cloud for Qwen3-TTS: QWEN3_TTS_CLOUD (runpod|modal|local), else modal."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    return os.getenv("QWEN3_TTS_CLOUD") or "modal"
+
+
 def get_sixtydb_api_key() -> str | None:
     """Get 60db API key from environment."""
     from dotenv import load_dotenv

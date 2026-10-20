@@ -227,6 +227,11 @@ off; any other `Captions` prop in that block restyles them (`fontSize`, `bottom`
   `--script` must be narration only — markdown headings in it would become caption words.
 - **Engines:** `scribe` (ElevenLabs, default when `ELEVENLABS_API_KEY` is set) or `whisper`
   (`uv sync --extra whisper`). Both just provide timing when a script is present.
+- **Whisper on a GPU.** The uv env's torch is the CPU wheel on Windows, which drops whisper to the
+  small `base` model. After `local_gpu.py --install whisper`, `captions.py` reruns itself in the
+  local GPU env and uses `turbo` on CUDA (`--no-local-gpu` opts out). Transcription runs with
+  `condition_on_previous_text=False`: with it on, whisper invented 37-95 fluent but fake words in
+  6 of 60 TTS scenes, which also looks like TTS babble when you use a transcript to QC audio.
 - **Re-run after re-timing audio.** The JSON holds times relative to the audio file, so changing
   `durationSeconds` is fine, but regenerating or `--max-wpm`-clamping a scene's MP3 needs new captions.
 - `align_captions.py` is different: it re-times hand-written `cap()` phrases in a config, rather than
@@ -270,6 +275,35 @@ truncates them. Gated apps (`ltx2`, `flux2` with `FLUX2_MODEL=klein-9b`) need a 
 secret with `HF_TOKEN`. The apps default to the name `huggingface-token`, but Modal's
 template names it `huggingface-secret`. The tool detects that and sets `HF_SECRET_NAME`;
 `--hf-secret NAME` overrides it.
+
+### Local GPU (`--cloud local`, free)
+
+`qwen3_tts` (and `voiceover.py --provider qwen3`) and `upscale` also run on the user's own
+NVIDIA GPU (8GB+), with no account and no cost. `dewatermark.py` already had a local mode
+(`--install`, then no `--cloud` flag); on Windows its installer now uses the same CUDA build
+(the old steps looked for `bin/python`, which a Windows venv never has). Other platforms are unchanged.
+
+```bash
+uv run tools/local_gpu.py --install --all     # isolated env at ~/.video-toolkit/local-gpu
+uv run tools/local_gpu.py --status            # torch/CUDA/GPU check
+uv run tools/qwen3_tts.py --text "Hello" --cloud local --output hello.mp3
+uv run tools/upscale.py --input in.png --output out.png --cloud local
+echo "QWEN3_TTS_CLOUD=local" >> .env          # make local the TTS default everywhere
+```
+
+- **Workers mirror the cloud endpoints** (`tools/local_workers/`): same payload, same response,
+  so `call_cloud_endpoint(provider="local")` is a drop-in. Model weights download on first use.
+- **PyTorch is the CUDA 12.8 build**, which RTX 50-series (Blackwell) needs; the env is
+  separate from the uv env so other users never pull in torch.
+- **Laptop power mode dominates TTS speed.** TTS is autoregressive (thousands of tiny kernels
+  per second of audio), so it is CPU-dispatch bound. Measured on an RTX 5070 Laptop, generation
+  takes ~2.3x the audio's length in Turbo/Performance and ~25x in a vendor Silent profile. Upscaling (big
+  kernels) is unaffected. Check `powercfg /getactivescheme` before blaming the code.
+- Upscale has no `--face-enhance` locally (GFPGAN needs basicsr, which doesn't import on
+  modern torchvision); the worker loads RealESRGAN weights with spandrel instead.
+- ~20s fixed cost per call (imports + model load), so `--scene-dir` batching matters.
+- The `whisper` feature has no `--cloud` flag: `captions.py --engine whisper` picks it up on its own
+  when the uv env can't see CUDA (see Burned Captions).
 
 ### AI Image Generation (FLUX.2 vs Ideogram 4)
 

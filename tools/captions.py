@@ -19,7 +19,9 @@ way the script does, never the way the recogniser misheard them. Pass
 
 Engines:
   scribe   ElevenLabs Scribe (hosted, needs ELEVENLABS_API_KEY)
-  whisper  openai-whisper (local, free; `uv sync --extra whisper`, pulls in torch)
+  whisper  openai-whisper (local, free; `uv sync --extra whisper`, pulls in torch).
+           If that torch has no CUDA and `local_gpu.py --install whisper` has been
+           run, the command reruns in the local GPU env (turbo on the GPU).
   auto     scribe when ELEVENLABS_API_KEY is set, else whisper (default)
 
 Usage:
@@ -40,11 +42,12 @@ import difflib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 from pacing import spoken_text
-from win_encoding import ensure_utf8_output
+from win_encoding import ensure_utf8_output, utf8_env
 
 AUDIO_EXTS = (".mp3", ".wav", ".m4a")
 SUFFIX = ".captions.json"
@@ -73,6 +76,31 @@ def transcribe_scribe(audio: Path, api_key: str, model_id: str, language: str | 
             for w in result.words if w.type == "word" and w.text.strip()]
 
 
+def rerun_on_local_gpu() -> None:
+    """Rerun this command in the local GPU env when this env can't use CUDA.
+
+    The uv env's torch is the CPU wheel on Windows, so whisper falls back to the
+    small `base` model. If `local_gpu.py --install whisper` has set up CUDA
+    whisper, use it instead: turbo on the GPU, better word timings.
+    """
+    if os.getenv("CAPTIONS_ON_LOCAL_GPU"):  # already the rerun
+        return
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return
+    except ImportError:  # no whisper extra here; the local env may still have it
+        pass
+    from local_gpu import feature_python
+    py = feature_python("whisper")
+    if not py:
+        return
+    print(f"whisper: no CUDA in this env, rerunning on the local GPU env ({py})", file=sys.stderr)
+    env = utf8_env()
+    env["CAPTIONS_ON_LOCAL_GPU"] = "1"
+    sys.exit(subprocess.run([str(py), str(Path(__file__).resolve()), *sys.argv[1:]], env=env).returncode)
+
+
 def load_whisper(model_name: str):
     try:
         import whisper
@@ -88,7 +116,11 @@ def load_whisper(model_name: str):
 
 
 def transcribe_whisper(model, audio: Path, language: str | None) -> list[dict]:
-    r = model.transcribe(str(audio), word_timestamps=True, language=language)
+    # Not conditioning each 30s window on the previous one's text stops whisper's known runaway
+    # hallucination (fluent invented sentences, a looped last line) over long narration. Measured on
+    # 60 TTS scenes: with conditioning, 6 transcripts gained 37-95 invented words; without, none did.
+    r = model.transcribe(str(audio), word_timestamps=True, language=language,
+                         condition_on_previous_text=False)
     return [{"w": w["word"].strip(), "s": w["start"], "e": w["end"]}
             for seg in r["segments"] for w in seg.get("words", []) if w["word"].strip()]
 
@@ -184,6 +216,8 @@ def main() -> None:
                     help="whisper model name (default: auto = turbo on CUDA, base on CPU)")
     ap.add_argument("--scribe-model", default="scribe_v2", choices=ELEVENLABS_STT_MODELS,
                     help="Scribe STT model (default: scribe_v2)")
+    ap.add_argument("--no-local-gpu", action="store_true",
+                    help="Run whisper in this env even if it has no CUDA (default: use the local GPU env when installed)")
     ap.add_argument("--json", action="store_true", help="Emit a machine-readable JSON summary on stdout")
     args = ap.parse_args()
 
@@ -206,6 +240,8 @@ def main() -> None:
         engine = "scribe" if api_key else "whisper"
     if engine == "scribe" and not api_key:
         sys.exit("Error: ELEVENLABS_API_KEY not set (or use --engine whisper)")
+    if engine == "whisper" and not args.no_local_gpu:
+        rerun_on_local_gpu()
     whisper_model = load_whisper(args.whisper_model) if engine == "whisper" else None
     scribe_model = resolve_model_id(args.scribe_model)
     print(f"engine: {engine}", file=sys.stderr)

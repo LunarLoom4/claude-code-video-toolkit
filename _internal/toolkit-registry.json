@@ -324,6 +324,28 @@
       "created": "2025-12-29",
       "updated": "2026-10-12"
     },
+    "local_gpu": {
+      "path": "tools/local_gpu.py",
+      "description": "Local GPU provider (--cloud local): runs qwen3_tts and upscale on the user's own NVIDIA GPU, free; captions.py --engine whisper also reruns there (turbo on CUDA) when the uv env's torch is CPU-only. Installs an isolated Python 3.12 + CUDA 12.8 PyTorch env at ~/.video-toolkit/local-gpu",
+      "usage": "uv run tools/local_gpu.py --install --all",
+      "status": "beta",
+      "category": "infrastructure",
+      "requires": "NVIDIA GPU with 8GB+ VRAM, uv",
+      "options": {
+        "features": [
+          "qwen3_tts",
+          "upscale",
+          "whisper"
+        ]
+      },
+      "envVars": [
+        "QWEN3_TTS_CLOUD",
+        "LOCAL_GPU_HOME"
+      ],
+      "estimatedCost": "Free",
+      "created": "2026-10-20",
+      "updated": "2026-10-20"
+    },
     "locate_watermark": {
       "path": "tools/locate_watermark.py",
       "description": "Helper tool to identify watermark coordinates using grid overlay and verification",
@@ -449,7 +471,7 @@
       "status": "stable",
       "category": "image-editing",
       "backend": "realesrgan",
-      "requires": "Modal or RunPod account",
+      "requires": "Modal or RunPod account, or a local NVIDIA GPU (--cloud local, no face enhancement)",
       "options": {
         "scale": [
           2,
@@ -544,7 +566,7 @@
       "status": "beta",
       "category": "audio-generation",
       "backend": "qwen3-tts",
-      "requires": "Modal or RunPod account",
+      "requires": "Modal or RunPod account, or a local NVIDIA GPU (--cloud local; QWEN3_TTS_CLOUD sets the default)",
       "options": {
         "speakers": [
           "Ryan",
