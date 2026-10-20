@@ -721,6 +721,61 @@ def check_propainter_installed(propainter_path: Path) -> dict:
     return status
 
 
+def install_propainter_deps_windows(propainter_path: Path, verbose: bool = True) -> bool:
+    """Steps 2-3 of install_propainter on Windows, where the generic path can't work.
+
+    A Windows venv has Scripts\\python.exe (never bin/python), PyPI's default torch
+    there is CPU-only, and RTX 50-series needs the CUDA 12.8 build. Other platforms
+    keep the original steps unchanged.
+    """
+    venv_path = propainter_path / ".venv"
+    python_bin = venv_python(venv_path)
+    uv = shutil.which("uv")
+    if not python_bin.exists():
+        # uv pins a Python with wheels for ProPainter's deps; the toolkit's own
+        # interpreter may be newer than PyTorch supports
+        venv_cmd = ([uv, "venv", "--python", LOCAL_PYTHON_VERSION, str(venv_path)] if uv
+                    else [sys.executable, "-m", "venv", str(venv_path)])
+        result = subprocess.run(venv_cmd, capture_output=not verbose)
+        if result.returncode != 0:
+            print(f"Error: Failed to create virtual environment", file=sys.stderr)
+            return False
+
+    pip_cmd = ([uv, "pip", "install", "--python", str(python_bin)] if uv
+               else [str(python_bin), "-m", "pip", "install"])
+
+    # Step 3: Install dependencies
+    if verbose:
+        print("[3/4] Installing Python dependencies...")
+        print("  This may take a few minutes...")
+
+    if not uv:
+        # Upgrade pip first
+        subprocess.run(pip_cmd + ["--upgrade", "pip"], capture_output=True)
+
+    # PyTorch: the CUDA 12.8 build (PyPI's Windows wheel is CPU-only)
+    result = subprocess.run(pip_cmd + TORCH_PACKAGES[:2] + ["--index-url", TORCH_INDEX_URL],
+                            capture_output=not verbose)
+    if result.returncode != 0:
+        print(f"Error: Failed to install PyTorch", file=sys.stderr)
+        return False
+
+    # Install other requirements, keeping the torch build installed above.
+    # av<14: torchvision 0.23's read_video passes av.open(metadata_errors=...),
+    # which PyAV 14 removed ("unexpected keyword argument 'metadata_errors'").
+    requirements_file = propainter_path / "requirements.txt"
+    if requirements_file.exists():
+        constraints_file = propainter_path / ".torch-constraints.txt"
+        constraints_file.write_text("\n".join(TORCH_PACKAGES[:2] + ["av<14"]))
+        result = subprocess.run(
+            pip_cmd + ["-r", str(requirements_file), "--constraint", str(constraints_file)],
+            capture_output=not verbose,
+        )
+        if result.returncode != 0:
+            print(f"Warning: Some requirements may have failed to install", file=sys.stderr)
+    return True
+
+
 def install_propainter(propainter_path: Path, verbose: bool = True) -> bool:
     """Install ProPainter with all dependencies."""
 
@@ -764,52 +819,50 @@ def install_propainter(propainter_path: Path, verbose: bool = True) -> bool:
 
     venv_path = propainter_path / ".venv"
     python_bin = venv_python(venv_path)
-    uv = shutil.which("uv")
-    if not python_bin.exists():
-        # uv pins a Python with wheels for ProPainter's deps; the toolkit's own
-        # interpreter may be newer than PyTorch supports
-        venv_cmd = ([uv, "venv", "--python", LOCAL_PYTHON_VERSION, str(venv_path)] if uv
-                    else [sys.executable, "-m", "venv", str(venv_path)])
-        result = subprocess.run(venv_cmd, capture_output=not verbose)
-        if result.returncode != 0:
-            print(f"Error: Failed to create virtual environment", file=sys.stderr)
+    if sys.platform == "win32":
+        if not install_propainter_deps_windows(propainter_path, verbose):
             return False
+    else:
+        if not venv_path.exists():
+            result = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path)],
+                capture_output=not verbose,
+            )
+            if result.returncode != 0:
+                print(f"Error: Failed to create virtual environment", file=sys.stderr)
+                return False
 
-    pip_cmd = ([uv, "pip", "install", "--python", str(python_bin)] if uv
-               else [str(python_bin), "-m", "pip", "install"])
+        pip_bin = venv_path / "bin" / "pip"
 
-    # Step 3: Install dependencies
-    if verbose:
-        print("[3/4] Installing Python dependencies...")
-        print("  This may take a few minutes...")
+        # Step 3: Install dependencies
+        if verbose:
+            print("[3/4] Installing Python dependencies...")
+            print("  This may take a few minutes...")
 
-    if not uv:
         # Upgrade pip first
-        subprocess.run(pip_cmd + ["--upgrade", "pip"], capture_output=True)
+        subprocess.run(
+            [str(pip_bin), "install", "--upgrade", "pip"],
+            capture_output=True,
+        )
 
-    # Install PyTorch: MPS build on macOS, CUDA 12.8 build elsewhere. PyPI's
-    # default on Windows is CPU-only, and RTX 50-series needs CUDA 12.8+.
-    torch_cmd = pip_cmd + TORCH_PACKAGES[:2]  # torch + torchvision
-    if sys.platform != "darwin":
-        torch_cmd += ["--index-url", TORCH_INDEX_URL]
-    result = subprocess.run(torch_cmd, capture_output=not verbose)
-    if result.returncode != 0:
-        print(f"Error: Failed to install PyTorch", file=sys.stderr)
-        return False
-
-    # Install other requirements, keeping the torch build installed above.
-    # av<14: torchvision's read_video passes av.open(metadata_errors=...), which
-    # PyAV 14 removed ("unexpected keyword argument 'metadata_errors'").
-    requirements_file = propainter_path / "requirements.txt"
-    if requirements_file.exists():
-        constraints_file = propainter_path / ".torch-constraints.txt"
-        constraints_file.write_text("\n".join(TORCH_PACKAGES[:2] + ["av<14"]))
+        # Install PyTorch (with MPS support for Apple Silicon)
         result = subprocess.run(
-            pip_cmd + ["-r", str(requirements_file), "--constraint", str(constraints_file)],
+            [str(pip_bin), "install", "torch", "torchvision"],
             capture_output=not verbose,
         )
         if result.returncode != 0:
-            print(f"Warning: Some requirements may have failed to install", file=sys.stderr)
+            print(f"Error: Failed to install PyTorch", file=sys.stderr)
+            return False
+
+        # Install other requirements
+        requirements_file = propainter_path / "requirements.txt"
+        if requirements_file.exists():
+            result = subprocess.run(
+                [str(pip_bin), "install", "-r", str(requirements_file)],
+                capture_output=not verbose,
+            )
+            if result.returncode != 0:
+                print(f"Warning: Some requirements may have failed to install", file=sys.stderr)
 
     # Step 4: Download model weights
     if verbose:
@@ -977,13 +1030,13 @@ def run_propainter(
 
     # Always capture output so we can report errors. UTF-8 both ways: tqdm's
     # progress bars aren't valid cp1252, the Windows default for captured output
+    windows_utf8 = ({"encoding": "utf-8", "errors": "replace", "env": utf8_env()}
+                    if sys.platform == "win32" else {"text": True})
     result = subprocess.run(
         cmd,
         cwd=propainter_path,
         capture_output=True,
-        encoding="utf-8",
-        errors="replace",
-        env=utf8_env(),
+        **windows_utf8,
     )
 
     if result.returncode != 0:

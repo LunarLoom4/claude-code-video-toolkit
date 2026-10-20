@@ -265,7 +265,8 @@ def check_voice() -> dict:
         detail = "local GPU (default)"
 
     return {
-        "qwen3_tts": {"ok": qwen3_ok, "local": qwen3_local, "detail": detail},
+        "qwen3_tts": {"ok": qwen3_ok, "cloud": bool(qwen3_modal) or bool(qwen3_runpod),
+                      "local": qwen3_local, "detail": detail},
         "elevenlabs": {"ok": bool(elevenlabs_key), "detail": "configured" if elevenlabs_key else "not configured (optional)"},
     }
 
@@ -423,14 +424,18 @@ def main():
         # Pick best available provider
         provider = "modal" if modal_configured > 0 else "runpod"
 
-        # Test TTS if available (locally when it's installed there: free)
-        qwen3_ok = voice["qwen3_tts"]["ok"]
-        if qwen3_ok:
-            tts_provider = "local" if voice["qwen3_tts"]["local"] and local["ok"] else provider
-            tts_test = test_cloud_endpoint("qwen3_tts", tts_provider)
+        # Test TTS if available: the cloud endpoint as before, plus the local GPU
+        # as a separate test when it's installed there
+        if voice["qwen3_tts"]["cloud"]:
+            tts_test = test_cloud_endpoint("qwen3_tts", provider)
             results["test_qwen3_tts"] = tts_test
             if verbose:
-                print(f"  {'[x]' if tts_test['ok'] else '[ ]'} Qwen3-TTS ({tts_provider}): {tts_test['detail']}")
+                print(f"  {'[x]' if tts_test['ok'] else '[ ]'} Qwen3-TTS ({provider}): {tts_test['detail']}")
+        if voice["qwen3_tts"]["local"] and local["ok"]:
+            local_tts_test = test_cloud_endpoint("qwen3_tts", "local")
+            results["test_qwen3_tts_local"] = local_tts_test
+            if verbose:
+                print(f"  {'[x]' if local_tts_test['ok'] else '[ ]'} Qwen3-TTS (local): {local_tts_test['detail']}")
 
         # Test FLUX.2 if available
         flux2_ok = any(t["ok"] for t in modal_env if "FLUX2" in t.get("env_var", ""))

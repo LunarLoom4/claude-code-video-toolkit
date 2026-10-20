@@ -280,7 +280,8 @@ template names it `huggingface-secret`. The tool detects that and sets `HF_SECRE
 
 `qwen3_tts` (and `voiceover.py --provider qwen3`) and `upscale` also run on the user's own
 NVIDIA GPU (8GB+), with no account and no cost. `dewatermark.py` already had a local mode
-(`--install`, then no `--cloud` flag); its installer now uses the same CUDA build.
+(`--install`, then no `--cloud` flag); on Windows its installer now uses the same CUDA build
+(the old steps looked for `bin/python`, which a Windows venv never has). Other platforms are unchanged.
 
 ```bash
 uv run tools/local_gpu.py --install --all     # isolated env at ~/.video-toolkit/local-gpu
